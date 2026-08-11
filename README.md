@@ -237,19 +237,50 @@ The production `.env` lives **only** on the server, at
 - never edited by the post-deploy script
 - verified byte-for-byte after every deployment
 
-Create it once, by hand, before the first deploy:
+The workflow fails early — before touching any files — if that `.env` is
+missing, so a first deploy will stop with:
+
+```
+Error: .../.env is missing.
+```
+
+That is expected on a brand-new server. When it happens the workflow uploads
+`.env.example` into the deployment directory for you (it never creates `.env`
+itself — production secrets are only ever entered on the server). Then, over
+SSH or in the cPanel File Manager:
 
 ```bash
 cd "$PROD_SSH_REMOTE_ROOT"
 cp .env.example .env
 nano .env            # set app.baseURL, PARTNER_DB_*, encryption.key
 chmod 600 .env
-php spark key:generate   # if encryption.key is still empty
-php check-env.php
 ```
 
-The workflow fails early — before touching any files — if that `.env` is
-missing.
+Minimum required values:
+
+```
+CI_ENVIRONMENT      = production
+app.baseURL         = 'https://partner.aicountly.com/'
+PARTNER_DB_HOST     = 127.0.0.1        # the host running Engage's PostgreSQL
+PARTNER_DB_PORT     = 5432
+PARTNER_DB_NAME     = engage_aicountly # the SAME database Engage uses
+PARTNER_DB_USER     = <db role>
+PARTNER_DB_PASSWORD = <db password>
+PARTNER_DB_DRIVER   = Postgre
+encryption.key      = <32 random bytes, see below>
+cookie.secure       = true
+```
+
+Generate the encryption key with either:
+
+```bash
+php spark key:generate                                   # once vendor/ is deployed
+php -r "echo 'hex2bin:'.bin2hex(random_bytes(32)).PHP_EOL;"   # works before the first deploy
+```
+
+Then re-run the workflow. After the first successful deploy you can verify the
+configuration on the server with `php check-env.php`, which masks secrets and
+tests the connection to the Partner Master.
 
 ### cPanel requirements
 

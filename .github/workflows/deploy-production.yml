@@ -137,10 +137,17 @@ jobs:
           "${SSH_CMD[@]}" "mkdir -p \"${REMOTE_ROOT}\""
 
           echo "Checking that the production .env exists (deployment never creates it)..."
-          "${SSH_CMD[@]}" "test -f \"${REMOTE_ROOT}/.env\"" || {
-            echo "::error::${PROD_SSH_REMOTE_ROOT}/.env is missing. Create it on the server from .env.example before deploying."
+          if ! "${SSH_CMD[@]}" "test -f \"${REMOTE_ROOT}/.env\""; then
+            # First deploy: the server has no .env.example to copy from yet, so
+            # put the template there now. The real .env is never generated here —
+            # production secrets are only ever entered on the server.
+            echo "No .env on the server. Uploading .env.example so it can be filled in..."
+            scp -P "$PROD_SSH_PORT" ${SCP_OPTS} .env.example \
+              "${PROD_SSH_USER}@${PROD_SSH_HOST}:${REMOTE_ROOT}/.env.example" || true
+
+            echo "::error::The production .env is missing. A copy of .env.example has been placed in the deployment directory. On the server run: cd <deploy root> && cp .env.example .env && nano .env — set app.baseURL, PARTNER_DB_* (point at the Engage PostgreSQL database) and encryption.key, then chmod 600 .env and re-run this workflow."
             exit 1
-          }
+          fi
 
       - name: Record .env fingerprint before deploy
         run: |
