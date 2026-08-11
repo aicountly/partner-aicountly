@@ -28,7 +28,8 @@ else
   echo "Set at least:"
   echo "    CI_ENVIRONMENT      = production"
   echo "    app.baseURL         = 'https://partner.aicountly.com/api/'"
-  echo "    PARTNER_DB_*        = the PostgreSQL database Engage uses (engage_partners lives there)"
+  echo "    PARTNER_DB_*        = a database dedicated to this portal (this is the only place partner data lives)"
+  echo "    PARTNER_ADMIN_KEY   = a random secret; set the SAME value as Engage's PARTNER_PORTAL_ADMIN_KEY"
   echo "    encryption.key      = $(php -r 'echo "hex2bin:".bin2hex(random_bytes(32));' 2>/dev/null || echo '<32 random bytes>')"
   echo "    cookie.secure       = true"
   echo
@@ -46,18 +47,9 @@ mkdir -p writable/cache writable/logs writable/session writable/uploads writable
 chmod -R 775 writable 2>/dev/null || chmod -R 777 writable
 
 echo "==> Database migrations"
-# The Partner Portal owns no schema of its own: the Partner Master
-# (engage_partners) is created and migrated by Engage. Migrations run only if
-# this repository ever gains its own migration files.
-shopt -s nullglob
-MIGRATIONS=(app/Database/Migrations/*.php)
-shopt -u nullglob
-if [ ${#MIGRATIONS[@]} -gt 0 ]; then
-  echo "Found ${#MIGRATIONS[@]} migration file(s) — running php spark migrate --all"
-  CI_ENVIRONMENT=production php spark migrate --all
-else
-  echo "No migrations in this repository — skipping (schema is owned by Engage)."
-fi
+# This portal owns the Partner Master schema (table: partners). Nothing else
+# creates or migrates it.
+CI_ENVIRONMENT=production php spark migrate --all
 
 echo "==> Clearing caches"
 CI_ENVIRONMENT=production php spark cache:clear

@@ -4,7 +4,7 @@
  * AICOUNTLY Partner Portal environment check.
  *
  * Prints the resolved configuration (secrets masked) and tests the connection
- * to the Partner Master owned by Engage. Safe to run on the server:
+ * to this portal's own Partner Master database. Safe to run on the server:
  *
  *   php check-env.php
  */
@@ -65,7 +65,10 @@ $encryptionKey = $read('encryption.key');
 echo 'encryption.key=' . ($encryptionKey === '' ? '(EMPTY — run: php spark key:generate)' : '*** (' . strlen($encryptionKey) . " chars)") . "\n";
 echo 'cookie.secure=' . ($read('cookie.secure', '(unset — defaults to on in production)')) . "\n";
 
-echo "\n--- Partner Master database (from .env) ---\n";
+$adminKey = $read('PARTNER_ADMIN_KEY');
+echo 'PARTNER_ADMIN_KEY=' . ($adminKey === '' ? '(EMPTY — Engage\'s Partner Master screens will get 503)' : '*** (' . strlen($adminKey) . " chars)") . "\n";
+
+echo "\n--- Partner Master database (from .env; owned by this portal) ---\n";
 echo "host={$host}\nport={$port}\ndatabase=" . ($name === '' ? '(EMPTY — set it in .env)' : $name) . "\n";
 echo 'username=' . ($user === '' ? '(EMPTY — set it in .env)' : $user) . "\n";
 echo 'password=*** (' . strlen($pass) . " chars)\n";
@@ -87,27 +90,27 @@ try {
     $pdo = new PDO($dsn, $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
     echo "connection: ok\n";
 
-    $table = $pdo->query("SELECT to_regclass('public.engage_partners') IS NOT NULL AS present")->fetchColumn();
+    $table = $pdo->query("SELECT to_regclass('public.partners') IS NOT NULL AS present")->fetchColumn();
     if ($driver === 'MySQLi') {
-        $table = (bool) $pdo->query("SHOW TABLES LIKE 'engage_partners'")->fetchColumn();
+        $table = (bool) $pdo->query("SHOW TABLES LIKE 'partners'")->fetchColumn();
     }
 
     if (! $table) {
-        fwrite(STDERR, "engage_partners: MISSING — point the portal at the Engage database and run Engage's migrations.\n");
+        fwrite(STDERR, "partners: MISSING — run `php spark migrate` (this portal owns the schema; nothing else creates it).\n");
 
         exit(1);
     }
 
-    echo "engage_partners: found\n";
+    echo "partners: found\n";
 
     $counts = $pdo->query(
         "SELECT COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE status = 'active' AND deleted_at IS NULL) AS active,
                 COUNT(*) FILTER (WHERE password_hash IS NOT NULL AND deleted_at IS NULL) AS with_access
-         FROM engage_partners"
+         FROM partners"
     )->fetch(PDO::FETCH_ASSOC);
 
-    echo "partners: {$counts['total']} total, {$counts['active']} active, {$counts['with_access']} with portal credentials\n";
+    echo "partner rows: {$counts['total']} total, {$counts['active']} active, {$counts['with_access']} with portal credentials\n";
 } catch (Throwable $e) {
     fwrite(STDERR, 'connection: FAILED — ' . $e->getMessage() . "\n");
 

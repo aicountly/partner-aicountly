@@ -2,6 +2,7 @@
 
 namespace Config;
 
+use App\Filters\AdminTokenFilter;
 use App\Filters\CorsFilter;
 use App\Filters\CsrfTokenFilter;
 use App\Filters\PartnerAuthFilter;
@@ -31,6 +32,8 @@ class Filters extends BaseFilters
         'csrf-token'    => CsrfTokenFilter::class,
         // Rejects anonymous callers, and partners deactivated/deleted in Engage.
         'partner-auth'  => PartnerAuthFilter::class,
+        // Shared-secret auth for Engage's admin API calls (X-Partner-Admin-Key).
+        'admin-token'   => AdminTokenFilter::class,
     ];
 
     public array $required = [
@@ -48,11 +51,9 @@ class Filters extends BaseFilters
     public array $globals = [
         'before' => [
             'cors',
-            // Verifies the CSRF token on every state-changing request
-            // (POST/PUT/PATCH/DELETE); GETs pass straight through. The SPA
-            // reads the token from the X-CSRF-TOKEN response header and
-            // echoes it back on writes.
-            'csrf',
+            // CSRF is applied per-route (login + the partner-auth group), not
+            // globally: the admin API is a server-to-server call authenticated
+            // by a shared secret, with no browser session to hold a token.
         ],
         'after' => [
             'cors',

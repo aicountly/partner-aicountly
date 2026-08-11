@@ -5,43 +5,49 @@ AICOUNTLY **Partner Portal** — the partner-facing sign-in and dashboard for
 
 - Frontend: Vite + React 19 SPA (`web/`) served from the document root
 - Backend: CodeIgniter 4 JSON API (`server-php/`) served from `/api`, PHP 8.2+
-- Database: the **Partner Master owned by Engage** (`engage_partners` in the
-  Engage PostgreSQL database) — this repository defines no partner schema of
-  its own
+- Database: **this portal owns the Partner Master** (table `partners`) — it is
+  the single source of truth for partner data. Engage stores no partner rows
+  of its own; its Add/Edit/Delete/List screens call this portal's admin API
 - Auth: independent session-based login for partners (no JWT, no SSO, no
   connection to `my.aicountly.com`)
 
-## There is no signup
+## Ownership: this portal owns the data, Engage owns the admin screen
 
-Partner accounts are created, edited, activated/deactivated, deleted and given
-credentials **only** in Engage (`engage.aicountly.org` → **Partners → Partner
-master**). This portal has no signup page, no registration page, no public
-account-creation endpoint, and no partner CRUD. The production deploy workflow
-fails the build if a signup/registration route is ever added.
+This is the single source of truth for partner data. There is no signup,
+registration or public account-creation endpoint here, and no other service
+holds a copy of this table — Engage's Partner Master screens
+(`engage.aicountly.org` → **Partners → Partner master**) do not store partner
+rows themselves; they call this portal's **admin API** to Add/Edit/Delete/List,
+authenticated by a shared secret rather than the partner-facing session
+cookie. The production deploy workflow fails the build if a signup/registration
+route is ever added to the *public* API.
 
 ```
-ENGAGE.AICOUNTLY.ORG
-        |
-        |  Add / Edit / Delete / Activate / Set password
-        v
-   PARTNER MASTER  (engage_partners)
-        |
-        v
-   Partner database  (PostgreSQL)
-        |
-        v
-PARTNER.AICOUNTLY.COM
-        |
-        |  Authentication (email + password, session)
-        v
-   Partner dashboard
+ENGAGE.AICOUNTLY.ORG                              PARTNER.AICOUNTLY.COM
+  Partners → Partner master (React UI)              owns the data
+        |                                                 ^
+        | superadmin JWT                                  |
+        v                                                  |
+  PartnersController  ──── X-Partner-Admin-Key ────  Admin API
+  (no local table)         (shared secret)           (v1/admin/partners/*)
+                                                             |
+                                                             v
+                                                     Partner database
+                                                     (table: partners)
+                                                             |
+                                                             v
+                                                     Public API
+                                                     (v1/auth/login, session)
+                                                             |
+                                                             v
+                                                       Partner dashboard
 ```
 
 A partner can sign in only when **all** of these hold. Every failure returns the
 same generic message so the login form cannot be used to discover which email
 addresses belong to a partner:
 
-| Partner state in Engage | Sign-in |
+| Partner state | Sign-in |
 |---|---|
 | Active, password set | allowed |
 | Wrong password | denied |
@@ -51,9 +57,9 @@ addresses belong to a partner:
 | No password set yet | denied |
 | Locked after 5 failed attempts | denied for 15 minutes |
 
-Deactivating or deleting a partner in Engage also ends any session that is
-already open — the signed-in partner is re-checked against the Partner Master on
-every request.
+Deactivating or deleting a partner (from Engage's admin screen, which writes
+here through the admin API) also ends any session that is already open — the
+signed-in partner is re-checked against this table on every request.
 
 ## Repository layout
 
@@ -67,10 +73,12 @@ partner-aicountly/
 ├── server-php/                     CodeIgniter 4 API    ->  public_html/api/
 │   ├── index.php  .htaccess  spark  check-env.php  .env.example
 │   └── app/
-│       ├── Controllers/Api/V1/     Auth, Profile
-│       ├── Filters/                PartnerAuth, Cors, CsrfToken
-│       ├── Libraries/PartnerAuth   credential verification + session
-│       └── Models/PartnersModel    read-side view of engage_partners
+│       ├── Controllers/Api/V1/         Auth, Profile (public — partner-facing)
+│       ├── Controllers/Api/V1/Admin/   Partners CRUD (Engage-facing, admin key)
+│       ├── Filters/                    PartnerAuth, AdminToken, Cors, CsrfToken
+│       ├── Libraries/PartnerAuth       credential verification + session
+│       ├── Models/PartnersModel        the Partner Master (table: partners)
+│       └── Database/Migrations/        owns this schema — nothing else creates it
 ├── scripts/
 │   ├── cpanel-rsync-api.filters    rsync rules (protect api/.env, writable/)
 │   └── cpanel-post-deploy-api.sh   spark commands + verification on the server
@@ -104,7 +112,34 @@ first-party. Responses follow the Engage contract:
 | GET | `/api/v1/profile` | partners | Read-only partner details |
 | POST | `/api/v1/auth/logout` | partners | Destroy the session |
 
-There is deliberately no signup, registration or partner-write endpoint.
+There is deliberately no signup, registration or public write endpoint.
+
+### Admin API (Engage-facing)
+
+Everything under `/api/v1/admin/partners` is called only by Engage's Partner
+Master screen, never by a browser directly. It is authenticated by a shared
+secret (`X-Partner-Admin-Key`, checked against `PARTNER_ADMIN_KEY`), **not**
+the partner session cookie or CSRF — this is a server-to-server call, so
+there's no browser session to hold a CSRF token.
+
+```
+GET    /api/v1/admin/partners                  ?q=&status=&partner_type=&country=
+                                                &has_portal_access=&include_deleted=
+                                                &only_deleted=&page=&limit=
+POST   /api/v1/admin/partners                  optional: password, or generate: true
+GET    /api/v1/admin/partners/{id}
+PUT    /api/v1/admin/partners/{id}
+DELETE /api/v1/admin/partners/{id}             soft delete
+POST   /api/v1/admin/partners/{id}/activate
+POST   /api/v1/admin/partners/{id}/deactivate
+POST   /api/v1/admin/partners/{id}/password    {"password":"..."} or {"generate":true}
+POST   /api/v1/admin/partners/{id}/unlock
+POST   /api/v1/admin/partners/{id}/restore
+```
+
+Same response contract as the public API. `password_hash` is never returned.
+A generated password is returned exactly once, as `generated_password`, and
+is never stored in clear text.
 
 ## Local setup
 
@@ -142,14 +177,15 @@ php spark cache:clear # clear the file cache (also clears login throttling)
 
 ### Database setup
 
-The portal does **not** have its own database. Point it at the same PostgreSQL
-database Engage uses and it will read the `engage_partners` table:
+This portal has its **own dedicated database** — do not point it at Engage's.
+It owns the Partner Master (table `partners`) end to end: schema, reads and
+writes.
 
 ```
 PARTNER_DB_HOST     = 127.0.0.1
 PARTNER_DB_PORT     = 5432
-PARTNER_DB_NAME     = engage_aicountly
-PARTNER_DB_USER     = <role that can read engage_partners>
+PARTNER_DB_NAME     = partner_aicountly
+PARTNER_DB_USER     = <a role with full rights on this database>
 PARTNER_DB_PASSWORD = <password>
 PARTNER_DB_DRIVER   = Postgre
 ```
@@ -158,29 +194,39 @@ CodeIgniter's native `database.default.*` names work too; if both are present
 the `PARTNER_DB_*` values win. Credentials come only from `.env` — nothing is
 hardcoded.
 
-The database role needs `SELECT` on `engage_partners` plus `UPDATE` on its login
-bookkeeping columns (`last_login_at`, `last_login_ip`, `failed_attempts`,
-`locked_until`). If you grant read-only access the portal still authenticates
-correctly; it just logs a warning and skips the bookkeeping.
-
-The `engage_partners` table itself is created by **Engage's** migrations
-(`2026-08-11-000070_CreateEngagePartners`) — do not create it here.
-
 These values go in `server-php/.env` locally, and in
 `${PROD_SSH_REMOTE_ROOT}/api/.env` on the server.
 
+### Admin key setup
+
+Generate a random secret and set it as `PARTNER_ADMIN_KEY` here **and** as
+`PARTNER_PORTAL_ADMIN_KEY` in Engage's `api/.env` — same value, both sides:
+
+```bash
+php -r "echo bin2hex(random_bytes(32)).PHP_EOL;"
+```
+
+Also set `PARTNER_PORTAL_API_URL` in Engage's `api/.env` to this portal's API
+base (e.g. `https://partner.aicountly.com/api`). Without both configured, the
+admin routes return `401`/`503` and Engage's Partner Master screen fails
+loudly rather than silently.
+
 ### Migrations
 
-This repository intentionally ships **no migrations**: the Partner Master schema
-belongs to Engage, so there is no duplicate partner schema to keep in sync. The
-post-deploy script checks `app/Database/Migrations/` and runs
-`php spark migrate --all` only if this repository ever gains migration files of
-its own. It always runs `php spark cache:clear`.
+This repository owns its schema — `php spark migrate` creates and updates the
+`partners` table. Nothing else creates it; Engage's migrations do not touch
+partner data. The post-deploy script always runs `php spark migrate --all`
+followed by `php spark cache:clear` on every deploy.
 
 ## Security
 
-- Passwords are verified against the bcrypt hashes Engage writes with
-  `password_hash()`; no plaintext password is ever stored or logged
+- Passwords are hashed with `password_hash()` on write (create, or the
+  set/generate-password admin endpoint) and verified on login; no plaintext
+  password is ever stored or logged
+- The admin API (`/api/v1/admin/*`) is authenticated by a shared secret
+  (`X-Partner-Admin-Key`), separate from the partner session cookie — a
+  partner session can never reach it, and the admin key can never authenticate
+  a partner login
 - Session-based auth with a fresh session ID on login (fixation defence) and
   full session destruction on logout
 - CSRF protection on every state-changing request. The token stays in the
@@ -237,9 +283,10 @@ workflow.
 7. Records a SHA-256 fingerprint of the production `.env`
 8. `rsync -avz --delete` to `${{ secrets.PROD_SSH_REMOTE_ROOT }}`, so files
    deleted from git are removed from production
-9. Runs `scripts/cpanel-post-deploy.sh` over SSH: fixes `writable/` permissions,
-   runs `php spark migrate --all` **if** this repo has migrations, runs
-   `php spark cache:clear`, resets OPcache, then runs `check-env.php`
+9. Runs `scripts/cpanel-post-deploy-api.sh` over SSH: fixes `writable/`
+   permissions, runs `php spark migrate --all` (this portal owns the Partner
+   Master schema), runs `php spark cache:clear`, resets OPcache, then runs
+   `check-env.php`
 10. Re-fingerprints the production `.env` and **fails the deployment** if it
     changed
 11. Verifies the deployed files and that `REVISION` matches the deployed commit
@@ -304,15 +351,20 @@ Minimum required values:
 ```
 CI_ENVIRONMENT      = production
 app.baseURL         = 'https://partner.aicountly.com/api/'
-PARTNER_DB_HOST     = 127.0.0.1        # the host running Engage's PostgreSQL
+PARTNER_DB_HOST     = 127.0.0.1         # this portal's OWN database — not Engage's
 PARTNER_DB_PORT     = 5432
-PARTNER_DB_NAME     = engage_aicountly # the SAME database Engage uses
+PARTNER_DB_NAME     = partner_aicountly
 PARTNER_DB_USER     = <db role>
 PARTNER_DB_PASSWORD = <db password>
 PARTNER_DB_DRIVER   = Postgre
+PARTNER_ADMIN_KEY   = <random secret; must match Engage's PARTNER_PORTAL_ADMIN_KEY>
 encryption.key      = <32 random bytes, see below>
 cookie.secure       = true
 ```
+
+After the first deploy, run `php spark migrate` (the post-deploy script does
+this automatically) to create the `partners` table — this portal owns that
+schema and nothing else creates it.
 
 Generate the encryption key with either:
 
