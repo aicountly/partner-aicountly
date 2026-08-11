@@ -68,6 +68,18 @@ echo 'cookie.secure=' . ($read('cookie.secure', '(unset — defaults to on in pr
 $adminKey = $read('PARTNER_ADMIN_KEY');
 echo 'PARTNER_ADMIN_KEY=' . ($adminKey === '' ? '(EMPTY — Engage\'s Partner Master screens will get 503)' : '*** (' . strlen($adminKey) . " chars)") . "\n";
 
+// The literal word "null" in a file-path .env setting is a footgun: CodeIgniter
+// treats it as the STRING "null", not "unset" — silently breaking whatever
+// feature relies on that path (most seriously: session.savePath, which breaks
+// login persistence — a partner can sign in but is logged out on the very next
+// request). Flag it here so it's caught before it reaches production.
+foreach (['session.savePath', 'cache.storePath'] as $pathSetting) {
+    if (strtolower($read($pathSetting)) === 'null') {
+        fwrite(STDERR, "\nWARNING: {$pathSetting}=null in .env is read literally as the word \"null\", not as \"use the default\".\n");
+        fwrite(STDERR, "Delete that line entirely so the application's coded default takes effect.\n");
+    }
+}
+
 echo "\n--- Partner Master database (from .env; owned by this portal) ---\n";
 echo "host={$host}\nport={$port}\ndatabase=" . ($name === '' ? '(EMPTY — set it in .env)' : $name) . "\n";
 echo 'username=' . ($user === '' ? '(EMPTY — set it in .env)' : $user) . "\n";
