@@ -1,0 +1,20 @@
+# Never commit real environment configuration — production .env lives only on
+# the server and is protected from deployment.
+.env
+.env.*
+!.env.example
+
+vendor/
+
+writable/cache/*
+writable/logs/*
+writable/session/*
+writable/uploads/*
+writable/debugbar/*
+!writable/**/.gitkeep
+!writable/**/index.html
+
+*.log
+.DS_Store
+.idea/
+.vscode/

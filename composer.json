@@ -1,0 +1,42 @@
+{
+    "name": "aicountly/partner-portal",
+    "description": "AICOUNTLY Partner Portal (CodeIgniter 4.6 + PostgreSQL). Partner-facing sign-in and dashboard. Partners are created and managed only in Engage (engage.aicountly.org).",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "php": "^8.2",
+        "codeigniter4/framework": "^4.6"
+    },
+    "require-dev": {
+        "mikey179/vfsstream": "^1.6",
+        "phpunit/phpunit": "^10.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "app/",
+            "Config\\": "app/Config/"
+        },
+        "exclude-from-classmap": [
+            "**/Database/Migrations/**"
+        ]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\Support\\": "tests/_support/"
+        }
+    },
+    "scripts": {
+        "post-update-cmd": [
+            "@composer dump-autoload"
+        ],
+        "serve": "php -S 127.0.0.1:8081 dev-server.php",
+        "cache:clear": "php spark cache:clear"
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "preferred-install": "dist",
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

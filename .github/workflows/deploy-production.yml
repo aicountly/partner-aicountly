@@ -1,0 +1,238 @@
+name: Deploy To cPanel Production
+
+# MANUAL ONLY. This workflow is never triggered by a push — production is
+# deployed deliberately from Actions → Deploy To cPanel Production → Run workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy" to confirm deploying to partner.aicountly.com'
+        required: true
+        default: 'deploy'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: partner-production
+  cancel-in-progress: false
+
+env:
+  PROD_SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+  PROD_SSH_PORT: ${{ secrets.PROD_SSH_PORT }}
+  PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
+  PROD_SSH_REMOTE_ROOT: ${{ secrets.PROD_SSH_REMOTE_ROOT }}
+  # -T avoids a cPanel motd corrupting the rsync protocol stream.
+  SSH_OPTS: -T -o BatchMode=yes -o LogLevel=ERROR -o RequestTTY=no
+  SCP_OPTS: -o BatchMode=yes -o LogLevel=ERROR -o RequestTTY=no
+  # cPanel shells often have a minimal PATH; point rsync at the usual locations.
+  RSYNC_PATH: env -i PATH=/usr/bin:/bin:/usr/local/bin:/usr/local/cpanel/3rdparty/bin rsync
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Confirm deployment
+        run: |
+          if [ "${{ inputs.confirm }}" != "deploy" ]; then
+            echo "::error::Deployment not confirmed. Re-run and type 'deploy' in the confirm input."
+            exit 1
+          fi
+
+      - name: Check required secrets
+        run: |
+          missing=0
+          for secret in PROD_SSH_HOST PROD_SSH_PORT PROD_SSH_USER PROD_SSH_REMOTE_ROOT; do
+            if [ -z "${!secret:-}" ]; then
+              echo "::error::Missing repository secret: ${secret}"
+              missing=1
+            fi
+          done
+          if [ -z "${{ secrets.PROD_SSH_PRIVATE_KEY }}" ]; then
+            echo "::error::Missing repository secret: PROD_SSH_PRIVATE_KEY"
+            missing=1
+          fi
+          [ "$missing" -eq 0 ] || exit 1
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: intl, mbstring, json, curl, pgsql, pdo_pgsql
+          coverage: none
+          tools: composer:v2
+
+      - name: Install Composer dependencies (production)
+        run: |
+          composer install --no-dev --no-interaction --no-progress --optimize-autoloader --prefer-dist
+          test -d vendor/codeigniter4/framework || {
+            echo "::error::CodeIgniter framework missing after composer install"
+            exit 1
+          }
+
+      - name: Validate application
+        run: |
+          # Every PHP file must parse before anything reaches production.
+          find app index.php check-env.php -name '*.php' -print0 \
+            | xargs -0 -n1 -P4 php -l > /dev/null
+          echo "PHP syntax OK"
+
+          # Guard the "no public signup" rule at the pipeline level: look for a
+          # declared route whose URI mentions signup/register (comments ignored).
+          if grep -nE "\\\$routes->[a-zA-Z]+\(\s*'[^']*(signup|sign-up|register)" app/Config/Routes.php; then
+            echo "::error::A signup/registration route was found. The Partner Portal must not expose one."
+            exit 1
+          fi
+          echo "No signup/registration routes"
+
+          # A committed .env would leak secrets and overwrite the server's.
+          if [ -f .env ]; then
+            echo "::error::.env is present in the repository. It must never be committed."
+            exit 1
+          fi
+          test -f .env.example || { echo "::error::.env.example is missing"; exit 1; }
+          echo "Environment template present, no committed .env"
+
+          php spark routes > /dev/null && echo "Routes load cleanly"
+
+      - name: Stamp revision for deploy verification
+        run: echo "${{ github.sha }}" > REVISION
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+
+      - name: Add production host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if ssh-keyscan -T 15 -p "$PROD_SSH_PORT" "$PROD_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null; then
+            chmod 600 ~/.ssh/known_hosts
+            echo "Host key pinned in known_hosts"
+          else
+            echo "::warning::ssh-keyscan could not reach ${PROD_SSH_HOST}:${PROD_SSH_PORT} — falling back to accept-new"
+            printf 'Host %s\n  Port %s\n  StrictHostKeyChecking accept-new\n' "$PROD_SSH_HOST" "$PROD_SSH_PORT" >> ~/.ssh/config
+            chmod 600 ~/.ssh/config
+          fi
+
+      - name: Verify SSH, rsync and the deployment directory
+        run: |
+          REMOTE_ROOT="${PROD_SSH_REMOTE_ROOT%/}"
+          SSH_CMD=(ssh -p "$PROD_SSH_PORT" ${SSH_OPTS} "${PROD_SSH_USER}@${PROD_SSH_HOST}")
+
+          echo "Testing SSH login..."
+          "${SSH_CMD[@]}" "echo SSH_OK"
+
+          echo "Checking for login banners that would corrupt rsync..."
+          LOGIN_OUT=$("${SSH_CMD[@]}" "printf RSYNC_SHELL_OK" 2>/dev/null || true)
+          if [ "$LOGIN_OUT" != "RSYNC_SHELL_OK" ]; then
+            echo "::warning::SSH stdout was not clean: $(printf %q "$LOGIN_OUT")"
+          fi
+
+          echo "Remote PHP and rsync:"
+          "${SSH_CMD[@]}" "php -v | head -1" || {
+            echo "::error::php CLI is not available for ${PROD_SSH_USER}@${PROD_SSH_HOST}."
+            exit 1
+          }
+          "${SSH_CMD[@]}" "command -v rsync && rsync --version | head -1" || {
+            echo "::error::rsync is not available on the production host. Enable it in cPanel or contact hosting support."
+            exit 1
+          }
+
+          echo "Ensuring the deployment directory exists..."
+          "${SSH_CMD[@]}" "mkdir -p \"${REMOTE_ROOT}\""
+
+          echo "Checking that the production .env exists (deployment never creates it)..."
+          "${SSH_CMD[@]}" "test -f \"${REMOTE_ROOT}/.env\"" || {
+            echo "::error::${PROD_SSH_REMOTE_ROOT}/.env is missing. Create it on the server from .env.example before deploying."
+            exit 1
+          }
+
+      - name: Record .env fingerprint before deploy
+        run: |
+          REMOTE_ROOT="${PROD_SSH_REMOTE_ROOT%/}"
+          ssh -p "$PROD_SSH_PORT" ${SSH_OPTS} "${PROD_SSH_USER}@${PROD_SSH_HOST}" \
+            "sha256sum '${REMOTE_ROOT}/.env' | cut -d' ' -f1" > /tmp/env-before.txt
+          echo "Fingerprint captured (value not printed)."
+
+      - name: Deploy with rsync
+        run: |
+          REMOTE_ROOT="${PROD_SSH_REMOTE_ROOT%/}"
+          RSYNC_RSH="ssh -p ${PROD_SSH_PORT} ${SSH_OPTS}"
+
+          # --delete removes files that were deleted from git.
+          # The filter file protects .env and the writable/ runtime directories.
+          rsync -avz --delete \
+            --rsync-path="${RSYNC_PATH}" \
+            --filter='merge scripts/cpanel-rsync.filters' \
+            --exclude='.env' \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            -e "$RSYNC_RSH" \
+            ./ \
+            "${PROD_SSH_USER}@${PROD_SSH_HOST}:${REMOTE_ROOT}/"
+
+      - name: Run production php spark commands
+        run: |
+          REMOTE_ROOT="${PROD_SSH_REMOTE_ROOT%/}"
+          scp -P "$PROD_SSH_PORT" ${SCP_OPTS} scripts/cpanel-post-deploy.sh \
+            "${PROD_SSH_USER}@${PROD_SSH_HOST}:${REMOTE_ROOT}/cpanel-post-deploy.sh"
+          ssh -p "$PROD_SSH_PORT" ${SSH_OPTS} "${PROD_SSH_USER}@${PROD_SSH_HOST}" \
+            "chmod +x '${REMOTE_ROOT}/cpanel-post-deploy.sh' && bash '${REMOTE_ROOT}/cpanel-post-deploy.sh' '${REMOTE_ROOT}'"
+
+      - name: Verify the production .env survived
+        run: |
+          REMOTE_ROOT="${PROD_SSH_REMOTE_ROOT%/}"
+          ssh -p "$PROD_SSH_PORT" ${SSH_OPTS} "${PROD_SSH_USER}@${PROD_SSH_HOST}" \
+            "sha256sum '${REMOTE_ROOT}/.env' | cut -d' ' -f1" > /tmp/env-after.txt
+          if ! cmp -s /tmp/env-before.txt /tmp/env-after.txt; then
+            echo "::error::The production .env changed during deployment. Restore it from your backup and review the rsync filters."
+            exit 1
+          fi
+          echo "Production .env is byte-for-byte unchanged."
+
+      - name: Verify deployment on the server
+        run: |
+          REMOTE_ROOT="${PROD_SSH_REMOTE_ROOT%/}"
+          ssh -p "$PROD_SSH_PORT" ${SSH_OPTS} "${PROD_SSH_USER}@${PROD_SSH_HOST}" '
+            set -e
+            cd '"${REMOTE_ROOT}"'
+            echo "---- document root ----"
+            ls -lah
+            echo "---- deployed revision ----"
+            cat REVISION
+            echo "---- required paths ----"
+            for path in index.php .htaccess app vendor writable assets; do
+              test -e "$path" || { echo "MISSING: $path"; exit 1; }
+            done
+            echo "all present"
+          '
+          if [ "$(ssh -p "$PROD_SSH_PORT" ${SSH_OPTS} "${PROD_SSH_USER}@${PROD_SSH_HOST}" "cat '${REMOTE_ROOT}/REVISION'")" != "${{ github.sha }}" ]; then
+            echo "::error::Deployed revision does not match this commit."
+            exit 1
+          fi
+          echo "Deployed revision matches ${{ github.sha }}"
+
+      - name: Verify the live site responds
+        run: |
+          URL="https://partner.aicountly.com/health"
+          echo "Probing ${URL}"
+          for attempt in 1 2 3 4 5; do
+            CODE=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 20 "$URL" || echo 000)
+            if [ "$CODE" = "200" ]; then
+              echo "Health check OK:"
+              cat /tmp/health.json
+              exit 0
+            fi
+            echo "Attempt ${attempt}: HTTP ${CODE}"
+            cat /tmp/health.json 2>/dev/null || true
+            sleep 6
+          done
+          echo "::error::Partner Portal health check did not return HTTP 200 after deployment."
+          exit 1

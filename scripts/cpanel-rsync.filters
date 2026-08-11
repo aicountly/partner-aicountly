@@ -1,0 +1,44 @@
+# rsync filters for the Partner Portal cPanel deployment.
+# Used as: rsync -avz --delete --filter='merge scripts/cpanel-rsync.filters'
+#
+# `P <path>` = protect: never delete this on the server even with --delete.
+# `- <path>` = exclude: never copy this from the CI checkout.
+
+# Production environment configuration lives ONLY on the server.
+P .env
+- .env
+
+# .env.example IS shipped from git on every release (not listed here).
+
+# Runtime data written by the application — must survive --delete.
+# These directories also exist in the repository (they ship an index.html), so
+# rsync recurses into them: the `/**` rules are what actually protect the files
+# inside. Protecting only the directory would still delete live partner sessions.
+P writable/session/
+P writable/session/**
+P writable/cache/
+P writable/cache/**
+P writable/logs/
+P writable/logs/**
+P writable/uploads/
+P writable/uploads/**
+P writable/debugbar/
+P writable/debugbar/**
+
+# cPanel/server-owned paths that live in the document root but are not part of
+# this repository — --delete must never remove them.
+P cgi-bin/
+P .well-known/
+P php.ini
+P .user.ini
+P error_log
+P .htpasswd*
+P .cpanel/
+P .quarantine/
+
+# Never ship local build/tooling artefacts.
+- .git/
+- .github/
+- tests/
+- .DS_Store
+- *.log
