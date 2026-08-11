@@ -24,7 +24,7 @@ class HealthController extends Controller
             $db = Database::connect();
             $db->query('SELECT 1');
             $dbAlive       = true;
-            $partnerMaster = $db->tableExists('engage_partners');
+            $partnerMaster = $db->tableExists('partners');
         } catch (Throwable $e) {
             log_message('error', 'Partner portal health check failed: ' . $e->getMessage());
         }
@@ -39,7 +39,7 @@ class HealthController extends Controller
             'checks'    => [
                 'db_env'         => $dbConfigured ? 'ok' : 'missing database settings in .env',
                 'db_connection'  => $dbAlive ? 'ok' : 'unreachable',
-                'partner_master' => $partnerMaster ? 'ok' : 'engage_partners table not found',
+                'partner_master' => $partnerMaster ? 'ok' : 'partners table not found — run php spark migrate',
             ],
         ]);
     }

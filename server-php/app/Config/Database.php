@@ -5,13 +5,12 @@ namespace Config;
 use CodeIgniter\Database\Config;
 
 /**
- * The Partner Portal reads the Partner Master owned by Engage
- * (engage.aicountly.org) — table `engage_partners` in the Engage PostgreSQL
- * database. There is deliberately no second partner schema.
+ * The Partner Portal owns the Partner Master — table `partners` in this
+ * portal's own database. Engage stores no partner data; its admin screens
+ * call this portal's admin API instead.
  *
- * Credentials come only from .env; nothing is hardcoded. Point the portal at a
- * database role that can SELECT engage_partners and UPDATE only its login
- * bookkeeping columns.
+ * Credentials come only from .env; nothing is hardcoded. Use a database
+ * dedicated to this portal, not Engage's.
  */
 class Database extends Config
 {
