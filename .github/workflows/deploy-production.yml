@@ -4,11 +4,6 @@ name: Deploy To cPanel Production
 # deployed deliberately from Actions → Deploy To cPanel Production → Run workflow.
 on:
   workflow_dispatch:
-    inputs:
-      confirm:
-        description: 'Type "deploy" to confirm deploying to partner.aicountly.com'
-        required: true
-        default: 'deploy'
 
 permissions:
   contents: read
@@ -34,13 +29,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Confirm deployment
-        run: |
-          if [ "${{ inputs.confirm }}" != "deploy" ]; then
-            echo "::error::Deployment not confirmed. Re-run and type 'deploy' in the confirm input."
-            exit 1
-          fi
-
       - name: Check required secrets
         run: |
           missing=0

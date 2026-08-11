@@ -174,7 +174,7 @@ never deploys.
 GitHub → Actions → Deploy To cPanel Production → Run workflow
 ```
 
-Type `deploy` in the confirmation input and run it.
+That is the whole flow — the workflow takes no inputs and asks for no confirmation.
 
 ### Required GitHub secrets
 
@@ -191,7 +191,7 @@ workflow.
 
 ### What the workflow does
 
-1. Checks the run was confirmed and that all five secrets are present
+1. Checks that all five `PROD_SSH_*` secrets are present
 2. Checks out the repository
 3. Sets up PHP 8.2 with `intl`, `mbstring`, `pgsql`, `pdo_pgsql`
 4. `composer install --no-dev --optimize-autoloader`
