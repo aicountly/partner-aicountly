@@ -136,24 +136,24 @@ jobs:
           echo "Ensuring the deployment directory exists..."
           "${SSH_CMD[@]}" "mkdir -p \"${REMOTE_ROOT}\""
 
-          echo "Checking that the production .env exists (deployment never creates it)..."
-          if ! "${SSH_CMD[@]}" "test -f \"${REMOTE_ROOT}/.env\""; then
-            # First deploy: the server has no .env.example to copy from yet, so
-            # put the template there now. The real .env is never generated here —
-            # production secrets are only ever entered on the server.
-            echo "No .env on the server. Uploading .env.example so it can be filled in..."
-            scp -P "$PROD_SSH_PORT" ${SCP_OPTS} .env.example \
-              "${PROD_SSH_USER}@${PROD_SSH_HOST}:${REMOTE_ROOT}/.env.example" || true
-
-            echo "::error::The production .env is missing. A copy of .env.example has been placed in the deployment directory. On the server run: cd <deploy root> && cp .env.example .env && nano .env — set app.baseURL, PARTNER_DB_* (point at the Engage PostgreSQL database) and encryption.key, then chmod 600 .env and re-run this workflow."
-            exit 1
+          # Whether .env exists is reported here but NOT enforced yet: the same
+          # rsync that deploys the app also ships .env.example, so on a first
+          # deploy the operator needs those files on the server before they can
+          # create .env. cpanel-post-deploy.sh enforces it after the sync, the
+          # way the Engage deployment does.
+          if "${SSH_CMD[@]}" "test -f \"${REMOTE_ROOT}/.env\""; then
+            echo "Production .env present — it will be preserved, not modified."
+          else
+            echo "::warning::No .env in the deployment directory yet. This deploy will ship the app and .env.example, then stop at the post-deploy step so you can create .env from that template and re-run."
           fi
 
       - name: Record .env fingerprint before deploy
         run: |
           REMOTE_ROOT="${PROD_SSH_REMOTE_ROOT%/}"
+          # "absent" on a first deploy — the file legitimately does not exist yet.
           ssh -p "$PROD_SSH_PORT" ${SSH_OPTS} "${PROD_SSH_USER}@${PROD_SSH_HOST}" \
-            "sha256sum '${REMOTE_ROOT}/.env' | cut -d' ' -f1" > /tmp/env-before.txt
+            "test -f '${REMOTE_ROOT}/.env' && sha256sum '${REMOTE_ROOT}/.env' | cut -d' ' -f1 || echo absent" \
+            > /tmp/env-before.txt
           echo "Fingerprint captured (value not printed)."
 
       - name: Deploy with rsync
@@ -185,7 +185,13 @@ jobs:
         run: |
           REMOTE_ROOT="${PROD_SSH_REMOTE_ROOT%/}"
           ssh -p "$PROD_SSH_PORT" ${SSH_OPTS} "${PROD_SSH_USER}@${PROD_SSH_HOST}" \
-            "sha256sum '${REMOTE_ROOT}/.env' | cut -d' ' -f1" > /tmp/env-after.txt
+            "test -f '${REMOTE_ROOT}/.env' && sha256sum '${REMOTE_ROOT}/.env' | cut -d' ' -f1 || echo absent" \
+            > /tmp/env-after.txt
+          if [ "$(cat /tmp/env-before.txt)" = "absent" ]; then
+            # Reached only if the operator created .env between the two checks.
+            echo "No .env existed before this deploy; nothing to compare."
+            exit 0
+          fi
           if ! cmp -s /tmp/env-before.txt /tmp/env-after.txt; then
             echo "::error::The production .env changed during deployment. Restore it from your backup and review the rsync filters."
             exit 1

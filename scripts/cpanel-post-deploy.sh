@@ -15,8 +15,24 @@ echo "==> Post-deploy in $(pwd)"
 if [ -f .env ]; then
   echo ".env present — leaving server configuration untouched."
 else
-  echo "ERROR: missing .env in ${APP_DIR}"
-  echo "Create it manually on the server (copy from .env.example) before deploying."
+  echo "ERROR: missing .env in $(pwd)"
+  echo
+  echo "The application files (including .env.example) have just been deployed,"
+  echo "so you can now create .env on the server and re-run the workflow:"
+  echo
+  echo "    cd $(pwd)"
+  echo "    cp .env.example .env"
+  echo "    nano .env          # or edit it in the cPanel File Manager"
+  echo "    chmod 600 .env"
+  echo
+  echo "Set at least:"
+  echo "    CI_ENVIRONMENT      = production"
+  echo "    app.baseURL         = 'https://partner.aicountly.com/'"
+  echo "    PARTNER_DB_*        = the PostgreSQL database Engage uses (engage_partners lives there)"
+  echo "    encryption.key      = $(php -r 'echo "hex2bin:".bin2hex(random_bytes(32));' 2>/dev/null || echo '<32 random bytes>')"
+  echo "    cookie.secure       = true"
+  echo
+  echo "Deployment never creates or edits .env — production secrets stay on the server."
   exit 1
 fi
 

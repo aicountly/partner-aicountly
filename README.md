@@ -237,17 +237,27 @@ The production `.env` lives **only** on the server, at
 - never edited by the post-deploy script
 - verified byte-for-byte after every deployment
 
-The workflow fails early — before touching any files — if that `.env` is
-missing, so a first deploy will stop with:
+### First deploy
+
+The deployment ships the application **and** `.env.example`, then stops at the
+post-deploy step because `.env` does not exist yet — the same sequence the
+Engage deployment uses. So the first run is expected to end red, with the
+command list you need printed in the log:
 
 ```
-Error: .../.env is missing.
+ERROR: missing .env in /home/.../public_html
+    cd /home/.../public_html
+    cp .env.example .env
+    nano .env
+    chmod 600 .env
 ```
 
-That is expected on a brand-new server. When it happens the workflow uploads
-`.env.example` into the deployment directory for you (it never creates `.env`
-itself — production secrets are only ever entered on the server). Then, over
-SSH or in the cPanel File Manager:
+It even prints a freshly generated `encryption.key` value to paste in. Follow
+those steps over SSH or in the cPanel File Manager, then re-run the workflow —
+the second run goes green.
+
+Deployment never creates or edits `.env`: production secrets are only ever
+entered on the server.
 
 ```bash
 cd "$PROD_SSH_REMOTE_ROOT"
