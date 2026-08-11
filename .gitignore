@@ -1,18 +1,23 @@
-# Never commit real environment configuration — production .env lives only on
-# the server and is protected from deployment.
+# Never commit real environment configuration — the production api/.env lives
+# only on the server and is protected from deployment.
 .env
-.env.*
+.env.local
 !.env.example
 
-vendor/
+node_modules/
+dist/
+web/node_modules/
+web/dist/
 
-writable/cache/*
-writable/logs/*
-writable/session/*
-writable/uploads/*
-writable/debugbar/*
-!writable/**/.gitkeep
-!writable/**/index.html
+server-php/vendor/
+server-php/writable/cache/*
+server-php/writable/logs/*
+server-php/writable/session/*
+server-php/writable/uploads/*
+server-php/writable/debugbar/*
+!server-php/writable/**/.gitkeep
+!server-php/writable/**/index.html
+server-php/REVISION
 
 *.log
 .DS_Store

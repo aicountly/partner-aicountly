@@ -3,7 +3,8 @@
 AICOUNTLY **Partner Portal** — the partner-facing sign-in and dashboard for
 `partner.aicountly.com`.
 
-- Framework: CodeIgniter 4 (server-rendered), PHP 8.2+
+- Frontend: Vite + React 19 SPA (`web/`) served from the document root
+- Backend: CodeIgniter 4 JSON API (`server-php/`) served from `/api`, PHP 8.2+
 - Database: the **Partner Master owned by Engage** (`engage_partners` in the
   Engage PostgreSQL database) — this repository defines no partner schema of
   its own
@@ -58,56 +59,82 @@ every request.
 
 ```
 partner-aicountly/
-├── index.php                     Front controller (flat cPanel layout)
-├── .htaccess                     Rewrites + denies app/, vendor/, writable/, .env
-├── dev-server.php                Router for `php -S` during local development
-├── spark                         CodeIgniter CLI
-├── check-env.php                 Verifies .env and the Partner Master connection
-├── assets/app.css                Portal stylesheet (no build step)
-├── app/
-│   ├── Config/                   App, Database, Session, Cookie, Security, Filters, Routes
-│   ├── Controllers/              Auth, Dashboard, Profile, Health
-│   ├── Filters/                  PartnerAuthFilter, GuestFilter
-│   ├── Libraries/PartnerAuth.php Credential verification + session handling
-│   ├── Models/PartnersModel.php  Read-side view of engage_partners
-│   └── Views/                    layouts, auth/login, dashboard, profile
+├── web/                            Vite + React 19 SPA  ->  public_html/
+│   ├── src/pages/                  Login, Dashboard, Profile
+│   ├── src/lib/api.js              axios: session cookie + CSRF header
+│   ├── src/lib/auth.jsx            auth context (asks the API who you are)
+│   └── public/.htaccess            SPA routing; never swallows /api
+├── server-php/                     CodeIgniter 4 API    ->  public_html/api/
+│   ├── index.php  .htaccess  spark  check-env.php  .env.example
+│   └── app/
+│       ├── Controllers/Api/V1/     Auth, Profile
+│       ├── Filters/                PartnerAuth, Cors, CsrfToken
+│       ├── Libraries/PartnerAuth   credential verification + session
+│       └── Models/PartnersModel    read-side view of engage_partners
 ├── scripts/
-│   ├── cpanel-rsync.filters      rsync rules (protect .env and writable/)
-│   └── cpanel-post-deploy.sh     spark commands + verification on the server
+│   ├── cpanel-rsync-api.filters    rsync rules (protect api/.env, writable/)
+│   └── cpanel-post-deploy-api.sh   spark commands + verification on the server
 └── .github/workflows/
-    └── deploy-production.yml     "Deploy To cPanel Production" (manual only)
+    └── deploy-production.yml       "Deploy To cPanel Production" (manual only)
 ```
 
-## Routes
+This mirrors the Engage layout, so both portals deploy the same way:
+
+| Local | cPanel |
+|---|---|
+| `web/dist/` | `${PROD_SSH_REMOTE_ROOT}/` |
+| `server-php/` | `${PROD_SSH_REMOTE_ROOT}/api/` |
+
+## API
+
+The SPA and the API are the same origin (`partner.aicountly.com` and
+`partner.aicountly.com/api`), which is what keeps the session cookie
+first-party. Responses follow the Engage contract:
+
+```
+{ "ok": true,  "data": ... }
+{ "ok": false, "error": "message", "details": ... }
+```
 
 | Method | Path | Access | Purpose |
 |---|---|---|---|
-| GET | `/` | public | Redirects to `/dashboard` or `/login` |
-| GET | `/login` | guests only | Login form |
-| POST | `/login` | guests only | Verify credentials, start session |
-| GET | `/dashboard` | partners | Authenticated dashboard |
-| GET | `/profile` | partners | Read-only partner details |
-| POST | `/logout` | partners | Destroy the session |
-| GET | `/health` | public | Deployment probe (no secrets, no partner data) |
+| GET | `/api/health` | public | Deployment probe (no secrets, no partner data) |
+| POST | `/api/v1/auth/login` | public | Verify credentials, start the session |
+| GET | `/api/v1/me` | partners | The signed-in partner |
+| GET | `/api/v1/profile` | partners | Read-only partner details |
+| POST | `/api/v1/auth/logout` | partners | Destroy the session |
+
+There is deliberately no signup, registration or partner-write endpoint.
 
 ## Local setup
 
+Two processes: the API and the Vite dev server. Vite proxies `/api` to the API
+so the session cookie stays first-party, exactly as in production.
+
 ```bash
+# API — http://127.0.0.1:8081
+cd server-php
 composer install
-cp .env.example .env          # then fill in the database settings below
+cp .env.example .env          # fill in the database settings below
 php spark key:generate        # writes encryption.key into .env
 php -S 127.0.0.1:8081 dev-server.php
+
+# SPA — http://127.0.0.1:5173
+cd web
+npm install
+npm run dev
 ```
 
-Then open <http://127.0.0.1:8081/login>.
+Then open <http://127.0.0.1:5173>.
 
-`php spark serve` is not used here: the app is deployed flat (no `public/`
-directory) to match the cPanel document root, so `dev-server.php` reproduces the
-production `.htaccess` rules for PHP's built-in server.
+`php spark serve` is not used: the API is deployed flat into `public_html/api`
+(no `public/` directory), so `dev-server.php` reproduces the production
+`.htaccess` rules for PHP's built-in server.
 
 Useful commands:
 
 ```bash
+cd server-php
 php check-env.php     # masked config dump + Partner Master connection test
 php spark routes      # confirm no signup/registration route exists
 php spark cache:clear # clear the file cache (also clears login throttling)
@@ -139,6 +166,9 @@ correctly; it just logs a warning and skips the bookkeeping.
 The `engage_partners` table itself is created by **Engage's** migrations
 (`2026-08-11-000070_CreateEngagePartners`) — do not create it here.
 
+These values go in `server-php/.env` locally, and in
+`${PROD_SSH_REMOTE_ROOT}/api/.env` on the server.
+
 ### Migrations
 
 This repository intentionally ships **no migrations**: the Partner Master schema
@@ -153,8 +183,11 @@ its own. It always runs `php spark cache:clear`.
   `password_hash()`; no plaintext password is ever stored or logged
 - Session-based auth with a fresh session ID on login (fixation defence) and
   full session destruction on logout
-- CSRF protection on every state-changing request (`security.csrfProtection =
-  session`, randomised tokens)
+- CSRF protection on every state-changing request. The token stays in the
+  server-side session and is published as an `X-CSRF-TOKEN` response header
+  that the SPA echoes back — it is deliberately never put in a
+  JavaScript-readable cookie, so the session cookie keeps `HttpOnly`
+- No token in `localStorage`: an XSS in the SPA cannot read the credential
 - Login throttling: 10 attempts per minute per IP, plus a 15-minute account lock
   after 5 consecutive failures (an admin can clear it from Engage)
 - Generic authentication errors — the form never reveals whether an account
@@ -229,7 +262,7 @@ Any failing step fails the workflow.
 ### Production environment file
 
 The production `.env` lives **only** on the server, at
-`${PROD_SSH_REMOTE_ROOT}/.env`. It is:
+`${PROD_SSH_REMOTE_ROOT}/api/.env`. It is:
 
 - never committed (see `.gitignore`)
 - never copied from the repository
@@ -245,8 +278,8 @@ Engage deployment uses. So the first run is expected to end red, with the
 command list you need printed in the log:
 
 ```
-ERROR: missing .env in /home/.../public_html
-    cd /home/.../public_html
+ERROR: missing .env in /home/.../public_html/api
+    cd /home/.../public_html/api
     cp .env.example .env
     nano .env
     chmod 600 .env
@@ -260,7 +293,7 @@ Deployment never creates or edits `.env`: production secrets are only ever
 entered on the server.
 
 ```bash
-cd "$PROD_SSH_REMOTE_ROOT"
+cd "$PROD_SSH_REMOTE_ROOT/api"
 cp .env.example .env
 nano .env            # set app.baseURL, PARTNER_DB_*, encryption.key
 chmod 600 .env
@@ -270,7 +303,7 @@ Minimum required values:
 
 ```
 CI_ENVIRONMENT      = production
-app.baseURL         = 'https://partner.aicountly.com/'
+app.baseURL         = 'https://partner.aicountly.com/api/'
 PARTNER_DB_HOST     = 127.0.0.1        # the host running Engage's PostgreSQL
 PARTNER_DB_PORT     = 5432
 PARTNER_DB_NAME     = engage_aicountly # the SAME database Engage uses

@@ -1,0 +1,26 @@
+RewriteEngine On
+RewriteBase /api/
+
+# Block direct access to application internals (CodeIgniter layout under api/).
+RewriteRule ^(app|scripts|tests|vendor|writable)/ - [F,L]
+RewriteRule ^(composer\.(json|lock)|spark|check-env\.php|dev-server\.php|REVISION)$ - [F,L]
+
+<FilesMatch "^\.env">
+  <IfModule mod_authz_core.c>
+    Require all denied
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+  </IfModule>
+</FilesMatch>
+
+# Serve real files/directories directly; everything else goes to CodeIgniter.
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [QSA,L]
+
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>

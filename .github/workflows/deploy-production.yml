@@ -47,6 +47,47 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ---------------------------------------------------------------- web/
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Create web .env for production build
+        working-directory: web
+        env:
+          VITE_API_URL_SECRET: ${{ secrets.VITE_API_URL }}
+          VITE_API_URL_VAR: ${{ vars.VITE_API_URL }}
+          VITE_APP_NAME_VAR: ${{ vars.VITE_APP_NAME }}
+        run: |
+          API_URL="${VITE_API_URL_SECRET:-}"
+          if [ -z "$API_URL" ]; then API_URL="${VITE_API_URL_VAR:-}"; fi
+          # Default to the same-origin path: the session cookie is only sent to
+          # partner.aicountly.com, so the API must be reached under /api there.
+          if [ -z "$API_URL" ]; then API_URL="/api"; fi
+
+          APP_NAME="${VITE_APP_NAME_VAR:-AICOUNTLY Partner Portal}"
+          printf 'VITE_API_URL=%s\nVITE_APP_NAME=%s\n' "$API_URL" "$APP_NAME" > .env
+          echo "Frontend build env configured (VITE_API_URL=${API_URL})"
+
+      - name: Build the SPA
+        working-directory: web
+        run: npm run build
+
+      - name: Verify build output
+        working-directory: web
+        run: |
+          test -f dist/index.html || { echo "::error::web/dist/index.html missing — build failed"; exit 1; }
+          test -f dist/.htaccess || { echo "::error::web/dist/.htaccess missing — SPA routing would 404"; exit 1; }
+          echo "Build ready: $(find dist -type f | wc -l) files in web/dist"
+
+      # --------------------------------------------------------- server-php/
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
         with:
@@ -55,7 +96,8 @@ jobs:
           coverage: none
           tools: composer:v2
 
-      - name: Install Composer dependencies (production)
+      - name: Install API dependencies (production)
+        working-directory: server-php
         run: |
           composer install --no-dev --no-interaction --no-progress --optimize-autoloader --prefer-dist
           test -d vendor/codeigniter4/framework || {
@@ -66,31 +108,34 @@ jobs:
       - name: Validate application
         run: |
           # Every PHP file must parse before anything reaches production.
-          find app index.php check-env.php -name '*.php' -print0 \
+          find server-php/app server-php/index.php server-php/check-env.php -name '*.php' -print0 \
             | xargs -0 -n1 -P4 php -l > /dev/null
           echo "PHP syntax OK"
 
           # Guard the "no public signup" rule at the pipeline level: look for a
           # declared route whose URI mentions signup/register (comments ignored).
-          if grep -nE "\\\$routes->[a-zA-Z]+\(\s*'[^']*(signup|sign-up|register)" app/Config/Routes.php; then
+          if grep -nE "\\\$routes->[a-zA-Z]+\(\s*'[^']*(signup|sign-up|register)" server-php/app/Config/Routes.php; then
             echo "::error::A signup/registration route was found. The Partner Portal must not expose one."
             exit 1
           fi
           echo "No signup/registration routes"
 
           # A committed .env would leak secrets and overwrite the server's.
-          if [ -f .env ]; then
-            echo "::error::.env is present in the repository. It must never be committed."
+          if [ -f server-php/.env ]; then
+            echo "::error::server-php/.env is present in the repository. It must never be committed."
             exit 1
           fi
-          test -f .env.example || { echo "::error::.env.example is missing"; exit 1; }
+          test -f server-php/.env.example || { echo "::error::server-php/.env.example is missing"; exit 1; }
           echo "Environment template present, no committed .env"
 
-          php spark routes > /dev/null && echo "Routes load cleanly"
+          (cd server-php && php spark routes > /dev/null) && echo "Routes load cleanly"
 
       - name: Stamp revision for deploy verification
-        run: echo "${{ github.sha }}" > REVISION
+        run: |
+          echo "${{ github.sha }}" > server-php/REVISION
+          echo "${{ github.sha }}" > web/dist/REVISION
 
+      # -------------------------------------------------------------- deploy
       - name: Start SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
@@ -109,7 +154,7 @@ jobs:
             chmod 600 ~/.ssh/config
           fi
 
-      - name: Verify SSH, rsync and the deployment directory
+      - name: Verify SSH, rsync and the deployment directories
         run: |
           REMOTE_ROOT="${PROD_SSH_REMOTE_ROOT%/}"
           SSH_CMD=(ssh -p "$PROD_SSH_PORT" ${SSH_OPTS} "${PROD_SSH_USER}@${PROD_SSH_HOST}")
@@ -133,70 +178,87 @@ jobs:
             exit 1
           }
 
-          echo "Ensuring the deployment directory exists..."
-          "${SSH_CMD[@]}" "mkdir -p \"${REMOTE_ROOT}\""
+          echo "Ensuring the deployment directories exist..."
+          "${SSH_CMD[@]}" "mkdir -p \"${REMOTE_ROOT}\" \"${REMOTE_ROOT}/api\""
 
-          # Whether .env exists is reported here but NOT enforced yet: the same
-          # rsync that deploys the app also ships .env.example, so on a first
-          # deploy the operator needs those files on the server before they can
-          # create .env. cpanel-post-deploy.sh enforces it after the sync, the
-          # way the Engage deployment does.
-          if "${SSH_CMD[@]}" "test -f \"${REMOTE_ROOT}/.env\""; then
-            echo "Production .env present — it will be preserved, not modified."
+          # Reported, not enforced: the rsync below ships api/.env.example, and
+          # cpanel-post-deploy-api.sh is the gate once the files are in place.
+          if "${SSH_CMD[@]}" "test -f \"${REMOTE_ROOT}/api/.env\""; then
+            echo "Production api/.env present — it will be preserved, not modified."
           else
-            echo "::warning::No .env in the deployment directory yet. This deploy will ship the app and .env.example, then stop at the post-deploy step so you can create .env from that template and re-run."
+            echo "::warning::No api/.env yet. This run deploys the app and api/.env.example, then stops at the post-deploy step so you can create api/.env from that template and re-run."
           fi
 
-      - name: Record .env fingerprint before deploy
+      - name: Record api/.env fingerprint before deploy
         run: |
           REMOTE_ROOT="${PROD_SSH_REMOTE_ROOT%/}"
           # "absent" on a first deploy — the file legitimately does not exist yet.
           ssh -p "$PROD_SSH_PORT" ${SSH_OPTS} "${PROD_SSH_USER}@${PROD_SSH_HOST}" \
-            "test -f '${REMOTE_ROOT}/.env' && sha256sum '${REMOTE_ROOT}/.env' | cut -d' ' -f1 || echo absent" \
+            "test -f '${REMOTE_ROOT}/api/.env' && sha256sum '${REMOTE_ROOT}/api/.env' | cut -d' ' -f1 || echo absent" \
             > /tmp/env-before.txt
           echo "Fingerprint captured (value not printed)."
 
-      - name: Deploy with rsync
+      - name: Deploy web/dist into public_html
         run: |
           REMOTE_ROOT="${PROD_SSH_REMOTE_ROOT%/}"
           RSYNC_RSH="ssh -p ${PROD_SSH_PORT} ${SSH_OPTS}"
 
-          # --delete removes files that were deleted from git.
-          # The filter file protects .env and the writable/ runtime directories.
+          # --delete removes files deleted from git. api/ is excluded here so the
+          # API is never touched by the frontend sync, and cPanel-owned paths in
+          # the document root are protected.
           rsync -avz --delete \
             --rsync-path="${RSYNC_PATH}" \
-            --filter='merge scripts/cpanel-rsync.filters' \
-            --exclude='.env' \
-            --exclude='.git/' \
-            --exclude='.github/' \
+            --exclude 'api/' \
+            --filter='P cgi-bin/' \
+            --filter='P .well-known/' \
+            --filter='P php.ini' \
+            --filter='P .user.ini' \
+            --filter='P error_log' \
+            --filter='P .htpasswd*' \
+            --filter='P .cpanel/' \
+            --filter='P .quarantine/' \
             -e "$RSYNC_RSH" \
-            ./ \
+            web/dist/ \
             "${PROD_SSH_USER}@${PROD_SSH_HOST}:${REMOTE_ROOT}/"
+
+      - name: Deploy server-php into public_html/api
+        run: |
+          REMOTE_ROOT="${PROD_SSH_REMOTE_ROOT%/}"
+          RSYNC_RSH="ssh -p ${PROD_SSH_PORT} ${SSH_OPTS}"
+
+          # The filter file protects api/.env and the writable/ runtime dirs.
+          rsync -avz --delete \
+            --rsync-path="${RSYNC_PATH}" \
+            --filter='merge scripts/cpanel-rsync-api.filters' \
+            --exclude='.env' \
+            -e "$RSYNC_RSH" \
+            server-php/ \
+            "${PROD_SSH_USER}@${PROD_SSH_HOST}:${REMOTE_ROOT}/api/"
 
       - name: Run production php spark commands
         run: |
           REMOTE_ROOT="${PROD_SSH_REMOTE_ROOT%/}"
-          scp -P "$PROD_SSH_PORT" ${SCP_OPTS} scripts/cpanel-post-deploy.sh \
-            "${PROD_SSH_USER}@${PROD_SSH_HOST}:${REMOTE_ROOT}/cpanel-post-deploy.sh"
+          scp -P "$PROD_SSH_PORT" ${SCP_OPTS} scripts/cpanel-post-deploy-api.sh \
+            "${PROD_SSH_USER}@${PROD_SSH_HOST}:${REMOTE_ROOT}/api/cpanel-post-deploy-api.sh"
           ssh -p "$PROD_SSH_PORT" ${SSH_OPTS} "${PROD_SSH_USER}@${PROD_SSH_HOST}" \
-            "chmod +x '${REMOTE_ROOT}/cpanel-post-deploy.sh' && bash '${REMOTE_ROOT}/cpanel-post-deploy.sh' '${REMOTE_ROOT}'"
+            "chmod +x '${REMOTE_ROOT}/api/cpanel-post-deploy-api.sh' && \
+             bash '${REMOTE_ROOT}/api/cpanel-post-deploy-api.sh' '${REMOTE_ROOT}/api'"
 
-      - name: Verify the production .env survived
+      - name: Verify the production api/.env survived
         run: |
           REMOTE_ROOT="${PROD_SSH_REMOTE_ROOT%/}"
           ssh -p "$PROD_SSH_PORT" ${SSH_OPTS} "${PROD_SSH_USER}@${PROD_SSH_HOST}" \
-            "test -f '${REMOTE_ROOT}/.env' && sha256sum '${REMOTE_ROOT}/.env' | cut -d' ' -f1 || echo absent" \
+            "test -f '${REMOTE_ROOT}/api/.env' && sha256sum '${REMOTE_ROOT}/api/.env' | cut -d' ' -f1 || echo absent" \
             > /tmp/env-after.txt
           if [ "$(cat /tmp/env-before.txt)" = "absent" ]; then
-            # Reached only if the operator created .env between the two checks.
-            echo "No .env existed before this deploy; nothing to compare."
+            echo "No api/.env existed before this deploy; nothing to compare."
             exit 0
           fi
           if ! cmp -s /tmp/env-before.txt /tmp/env-after.txt; then
-            echo "::error::The production .env changed during deployment. Restore it from your backup and review the rsync filters."
+            echo "::error::The production api/.env changed during deployment. Restore it from your backup and review the rsync filters."
             exit 1
           fi
-          echo "Production .env is byte-for-byte unchanged."
+          echo "Production api/.env is byte-for-byte unchanged."
 
       - name: Verify deployment on the server
         run: |
@@ -206,34 +268,44 @@ jobs:
             cd '"${REMOTE_ROOT}"'
             echo "---- document root ----"
             ls -lah
-            echo "---- deployed revision ----"
-            cat REVISION
+            echo "---- api ----"
+            ls -lah api | head -20
             echo "---- required paths ----"
-            for path in index.php .htaccess app vendor writable assets; do
+            for path in index.html .htaccess assets api/index.php api/.htaccess api/app api/vendor api/writable; do
               test -e "$path" || { echo "MISSING: $path"; exit 1; }
             done
             echo "all present"
+            echo "---- deployed revisions ----"
+            cat REVISION; cat api/REVISION
           '
-          if [ "$(ssh -p "$PROD_SSH_PORT" ${SSH_OPTS} "${PROD_SSH_USER}@${PROD_SSH_HOST}" "cat '${REMOTE_ROOT}/REVISION'")" != "${{ github.sha }}" ]; then
-            echo "::error::Deployed revision does not match this commit."
-            exit 1
-          fi
-          echo "Deployed revision matches ${{ github.sha }}"
+          for marker in REVISION api/REVISION; do
+            GOT=$(ssh -p "$PROD_SSH_PORT" ${SSH_OPTS} "${PROD_SSH_USER}@${PROD_SSH_HOST}" "cat '${REMOTE_ROOT}/${marker}'")
+            if [ "$GOT" != "${{ github.sha }}" ]; then
+              echo "::error::${marker} does not match this commit."
+              exit 1
+            fi
+          done
+          echo "Deployed revisions match ${{ github.sha }}"
 
       - name: Verify the live site responds
         run: |
-          URL="https://partner.aicountly.com/health"
-          echo "Probing ${URL}"
-          for attempt in 1 2 3 4 5; do
-            CODE=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 20 "$URL" || echo 000)
-            if [ "$CODE" = "200" ]; then
-              echo "Health check OK:"
-              cat /tmp/health.json
-              exit 0
+          for probe in "https://partner.aicountly.com/api/health" "https://partner.aicountly.com/"; do
+            echo "Probing ${probe}"
+            OK=0
+            for attempt in 1 2 3 4 5; do
+              CODE=$(curl -sS -o /tmp/probe.out -w '%{http_code}' --max-time 20 "$probe" || echo 000)
+              if [ "$CODE" = "200" ]; then
+                echo "  OK (200)"
+                head -c 300 /tmp/probe.out; echo
+                OK=1
+                break
+              fi
+              echo "  attempt ${attempt}: HTTP ${CODE}"
+              sleep 6
+            done
+            if [ "$OK" -ne 1 ]; then
+              echo "::error::${probe} did not return HTTP 200 after deployment."
+              cat /tmp/probe.out 2>/dev/null || true
+              exit 1
             fi
-            echo "Attempt ${attempt}: HTTP ${CODE}"
-            cat /tmp/health.json 2>/dev/null || true
-            sleep 6
           done
-          echo "::error::Partner Portal health check did not return HTTP 200 after deployment."
-          exit 1
