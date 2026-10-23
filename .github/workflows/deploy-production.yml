@@ -30,6 +30,8 @@ jobs:
 
     steps:
       - name: Check required secrets
+        env:
+          PROD_SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
         run: |
           missing=0
           for secret in PROD_SSH_HOST PROD_SSH_PORT PROD_SSH_USER PROD_SSH_REMOTE_ROOT; do
@@ -38,7 +40,7 @@ jobs:
               missing=1
             fi
           done
-          if [ -z "${{ secrets.PROD_SSH_PRIVATE_KEY }}" ]; then
+          if [ -z "${PROD_SSH_PRIVATE_KEY}" ]; then
             echo "::error::Missing repository secret: PROD_SSH_PRIVATE_KEY"
             missing=1
           fi
