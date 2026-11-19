@@ -1,4 +1,4 @@
-name: Deploy To cPanel Production
+name: Deploy To S01 Production
 
 # MANUAL ONLY. This workflow is never triggered by a push — production is
 # deployed deliberately from Actions → Deploy To cPanel Production → Run workflow.
@@ -50,6 +50,16 @@ jobs:
         uses: actions/checkout@v4
 
       # ---------------------------------------------------------------- web/
+      - name: Verify S01 deployment target
+        id: s01_target
+        env:
+          AIC_S01_TARGETS: '[{"domain":"partner.aicountly.com","account":"partneraicountly","root":"/home/partneraicountly/public_html","verified_blueprint":true,"ssh_login":"aicd76a3c576911e8ca8"}]'
+          AIC_TARGET_PROD_SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+          AIC_TARGET_PROD_SSH_PORT: ${{ secrets.PROD_SSH_PORT }}
+          AIC_TARGET_PROD_SSH_REMOTE_ROOT: ${{ secrets.PROD_SSH_REMOTE_ROOT }}
+          AIC_TARGET_PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
+        run: python3 "$GITHUB_WORKSPACE/.github/scripts/s01-target-guard.py"
+
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
@@ -147,12 +157,12 @@ jobs:
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          if ssh-keyscan -T 15 -p "$PROD_SSH_PORT" "$PROD_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null; then
+          if python3 "$GITHUB_WORKSPACE/.github/scripts/s01-keyscan.py" -T 15 -p "$PROD_SSH_PORT" "$PROD_SSH_HOST" > ~/.ssh/known_hosts 2>/dev/null; then
             chmod 600 ~/.ssh/known_hosts
             echo "Host key pinned in known_hosts"
           else
-            echo "::warning::ssh-keyscan could not reach ${PROD_SSH_HOST}:${PROD_SSH_PORT} — falling back to accept-new"
-            printf 'Host %s\n  Port %s\n  StrictHostKeyChecking accept-new\n' "$PROD_SSH_HOST" "$PROD_SSH_PORT" >> ~/.ssh/config
+            { echo "::error::S01 host-key verification failed; deployment stopped."; exit 1; }
+            { echo "::error::S01 host-key verification failed; deployment stopped."; exit 1; }
             chmod 600 ~/.ssh/config
           fi
 
