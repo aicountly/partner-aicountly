@@ -180,9 +180,12 @@ jobs:
             echo "::warning::SSH stdout was not clean: $(printf %q "$LOGIN_OUT")"
           fi
 
+          # S01's deploy sandbox has no `php` on PATH (Remi's PHP lives in /opt/remi/php84), so
+          # look where scripts/cpanel-post-deploy-api.sh looks: PHP >= 8.2 with pgsql. That
+          # script resolves its own PHP later; this only stops the run before anything uploads.
           echo "Remote PHP and rsync:"
-          "${SSH_CMD[@]}" "php -v | head -1" || {
-            echo "::error::php CLI is not available for ${PROD_SSH_USER}@${PROD_SSH_HOST}."
+          "${SSH_CMD[@]}" 'for c in "$(command -v php 2>/dev/null || true)" /opt/remi/php84/root/usr/bin/php /opt/remi/php83/root/usr/bin/php /opt/remi/php82/root/usr/bin/php /usr/bin/php84 /usr/bin/php83 /usr/bin/php82 /usr/local/bin/php /usr/bin/php /opt/cpanel/ea-php84/root/usr/bin/php /opt/cpanel/ea-php83/root/usr/bin/php /opt/cpanel/ea-php82/root/usr/bin/php; do [ -n "$c" ] && [ -x "$c" ] && "$c" -r "exit(PHP_VERSION_ID >= 80200 && extension_loaded(\"pgsql\") ? 0 : 1);" 2>/dev/null && { echo "$c: PHP $("$c" -r "echo PHP_VERSION;")"; exit 0; }; done; exit 1' || {
+            echo "::error::No PHP CLI >= 8.2 with pgsql for ${PROD_SSH_USER}@${PROD_SSH_HOST} (looked on PATH, /opt/remi/php8x, /usr/bin/php8x, /usr/local/bin, /usr/bin, /opt/cpanel)."
             exit 1
           }
           "${SSH_CMD[@]}" "command -v rsync && rsync --version | head -1" || {
